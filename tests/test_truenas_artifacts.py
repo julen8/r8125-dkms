@@ -71,6 +71,26 @@ class ArtifactTests(unittest.TestCase):
                 self.version, targets[self.version], self.root))
             path.write_text(original_contents)
 
+    def test_adding_25_10_6_preserves_existing_target_fingerprints(self):
+        targets = json.loads((artifacts.ROOT / 'scripts/truenas-targets.json').read_text())
+        previous_targets = dict(targets)
+        previous_targets.pop('25.10.6')
+        for version in ('25.04.1', '25.10.7'):
+            with self.subTest(version=version):
+                self.assertEqual(
+                    artifacts.build_fingerprint(version, previous_targets[version]),
+                    artifacts.build_fingerprint(version, targets[version]))
+
+    def test_restore_hit_reports_reused_to_workflow(self):
+        output = self.root / 'output'
+        with patch.dict(artifacts.os.environ, {
+            'TRUENAS_VERSION': self.version, 'BUILD_FINGERPRINT': self.fingerprint,
+            'FORCE_REBUILD': 'false', 'GITHUB_OUTPUT': str(output), 'GH_REPO': 'owner/repo',
+        }), patch.object(sys, 'argv', ['truenas_artifacts.py', 'restore']), \
+                patch.object(artifacts, 'restore', return_value=True):
+            artifacts.main()
+        self.assertEqual(output.read_text(), 'reused=true\n')
+
     def test_reuses_complete_verified_release(self):
         source = self.create_artifacts()
         destination = self.root / 'restored'

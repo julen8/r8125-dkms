@@ -54,7 +54,9 @@ makedeb
 
 工作流查询已发布的 Release，查找相同指纹的 `.build.json` 记录，下载并校验完整产物后跳过该目标的下载和编译。没有记录、产物缺失或校验失败时重新编译；草稿 Release 不会被复用。旧 Release 没有指纹记录，需要首次重新编译。手动运行勾选 `force_rebuild` 可强制重编译所选目标，但仍可使用 update 下载缓存。
 
-每次 Release 都包含所选目标的完整产物集合，包括本次编译和复用的产物。复用产物的构建信息保留原始编译提交。标签推送发布到同名 Release；分支和手动运行发布到独立预发布 Release，名称为 `ci-<commit>-<run-id>-<attempt>`。工作流先创建草稿并上传全部附件，再公开发布；不会覆盖已存在的同名 Release。上传或发布失败可能留下草稿，重跑同一标签前需清理该草稿。
+每次 Release 都包含所选目标的完整产物集合，包括本次编译和复用的产物。复用产物的构建信息保留原始编译提交。标签推送发布到同名 Release；分支和手动运行发布到独立 Release，名称为 `ci-<commit>-<run-id>-<attempt>`。所有运行均发布正式 Release：先创建草稿并上传全部附件，再公开发布并标记为 Latest；不会覆盖已存在的同名 Release。上传或发布失败可能留下草稿，重跑同一标签前需清理该草稿。手动选择单个版本时，Latest 也只包含该次所选版本的产物。
+
+Actions 页面仍会为每个所选版本显示 `build` 矩阵任务，因为复用的文件也需要上传到本次 Release。这不表示每个版本都重新编译：复用成功时，`Cache official TrueNAS update` 和 `Build against official update headers` 步骤均显示 `skipped`。新 Release 中出现旧版本附件同样不代表重编译。
 
 驱动版本、下载地址和 SHA256 从本仓库的 [PKGBUILD](PKGBUILD) 读取；编译选项与 [dkms.conf](dkms.conf) 一致：禁用 ASPM，启用 TX 多队列、PTP 和 RSS。
 

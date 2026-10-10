@@ -143,7 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           release_tag="ci-${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          options=(--prerelease --latest=false)
+          options=(--latest=false)
           if [[ "$REF_TYPE" == tag ]]; then
             release_tag="$REF_NAME"
             options=(--verify-tag --latest=false)
@@ -165,4 +165,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "r8125 TrueNAS modules: $release_tag" \
             --notes-file release-notes.txt "${options[@]}"
-          gh release edit "$release_tag" --draft=false --latest=false
+          gh release edit "$release_tag" --draft=false --latest=true
