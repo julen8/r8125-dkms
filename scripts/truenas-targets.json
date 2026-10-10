@@ -1,0 +1,18 @@
+{
+  "25.04.1": {
+    "update_url": "https://download.truenas.com/TrueNAS-SCALE-Fangtooth/25.04.1/TrueNAS-SCALE-25.04.1.update",
+    "checksum_url": "https://download.truenas.com/TrueNAS-SCALE-Fangtooth/25.04.1/TrueNAS-SCALE-25.04.1.update.sha256",
+    "update_sha256": "dc443e660617a0c2ce24c614c2798ed973f55a2f492ecb3ecce578f1f12996d8",
+    "kernel_release": "6.12.15-production+truenas",
+    "container": "debian:bookworm",
+    "compiler": "gcc-12"
+  },
+  "25.10.7": {
+    "update_url": "https://download.truenas.com/TrueNAS-SCALE-Goldeye/25.10.7/TrueNAS-SCALE-25.10.7.update",
+    "checksum_url": "https://download.truenas.com/TrueNAS-SCALE-Goldeye/25.10.7/TrueNAS-SCALE-25.10.7.update.sha256",
+    "update_sha256": "35345e41412e7ce031da5efa1ef2714559f63227cc237c9a8cea850ae5ead8c3",
+    "kernel_release": "6.12.105-production+truenas",
+    "container": "debian:bookworm",
+    "compiler": "gcc-12"
+  }
+}
