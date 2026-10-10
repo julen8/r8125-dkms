@@ -11,6 +11,11 @@ on:
         default: all
         required: true
         type: string
+      force_rebuild:
+        description: Rebuild even when a verified published artifact exists
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
@@ -33,6 +38,10 @@ jobs:
           import json
           import os
           import re
+          import sys
+
+          sys.path.insert(0, 'scripts')
+          from truenas_artifacts import build_fingerprint
 
           with open('scripts/truenas-targets.json') as manifest:
               targets = json.load(manifest)
@@ -46,9 +55,10 @@ jobs:
               if selected == 'all' or selected == version:
                   checksum = target['update_sha256']
                   if not re.fullmatch(r'[0-9a-f]{64}', checksum):
-                    raise SystemExit(f'Invalid update SHA256: {version}')
+                      raise SystemExit(f'Invalid update SHA256: {version}')
                   entries.append({'version': version, 'container': target['container'],
-                          'update_sha256': checksum})
+                                  'update_sha256': checksum,
+                                  'fingerprint': build_fingerprint(version, target)})
           if not entries:
               raise SystemExit('No build targets selected')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
@@ -72,21 +82,35 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Reuse verified published artifacts
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRUENAS_VERSION: ${{ matrix.version }}
+          BUILD_FINGERPRINT: ${{ matrix.fingerprint }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild && 'true' || 'false' }}
+        run: python3 scripts/truenas_artifacts.py restore
+
       - name: Cache official TrueNAS update
+        if: steps.reuse.outputs.reused != 'true'
         uses: actions/cache@v4
         with:
           path: .build/truenas-${{ matrix.version }}/update.squashfs
           key: truenas-update-${{ runner.os }}-${{ matrix.version }}-${{ matrix.update_sha256 }}
 
       - name: Build against official update headers
+        if: steps.reuse.outputs.reused != 'true'
         env:
           TRUENAS_VERSION: ${{ matrix.version }}
           BUILD_CONTAINER: ${{ matrix.container }}
+          BUILD_FINGERPRINT: ${{ matrix.fingerprint }}
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
             -e TRUENAS_VERSION -e GITHUB_SHA -e GITHUB_REPOSITORY \
+            -e BUILD_FINGERPRINT \
             "$BUILD_CONTAINER" bash scripts/build-truenas-ko.sh
 
       - name: Upload build artifacts
@@ -137,6 +161,8 @@ jobs:
             printf '\n' >> release-notes.txt
           done
           gh release create "$release_tag" dist/* \
+            --draft \
             --target "$GITHUB_SHA" \
             --title "r8125 TrueNAS modules: $release_tag" \
             --notes-file release-notes.txt "${options[@]}"
+          gh release edit "$release_tag" --draft=false --latest=false

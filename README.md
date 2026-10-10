@@ -46,32 +46,24 @@ makedeb
 
 [构建工作流](.github/workflows/truenas-ko.yml) 会在分支提交、标签推送以及手动运行时编译 x86_64 的 `r8125.ko`，并上传到本仓库的 GitHub Release。它不是 Debian 安装包，也不需要在 TrueNAS 上安装 DKMS。
 
-内核源码从 [truenas/linux](https://github.com/truenas/linux) 获取，选择规则如下：
+目标版本由 [scripts/truenas-targets.json](scripts/truenas-targets.json) 定义，每项包含官方 `.update` 地址、固定 SHA256、内核版本、构建容器和编译器。添加版本只需增加对应条目。自动运行处理所有目标；手动运行可通过 `version` 选择一个版本，或使用 `all`。
 
-- 推送 `TS-25.04.2` 等标签时，严格使用内核源码仓库的同名标签。
-- 分支提交或手动运行时，如果当前提交有唯一的 `TS-*` 标签，使用该标签；没有则默认使用 `TS-25.04.1`。
-- 当前提交有多个 `TS-*` 标签时，构建会报错，请选择具体标签手动运行。
-- 推送非 `TS-*` 标签或内核仓库不存在对应标签时，构建失败，不会静默退回默认版本。
+构建从校验通过的官方 `.update` 中提取内核 headers、生产配置和 `Module.symvers`，不重新编译整个内核。update 文件通过 GitHub Actions 缓存复用，缓存 key 包含目标版本和固定 SHA256，恢复后仍会校验。
 
-例如，将包含工作流的提交标记为目标 TrueNAS 版本后推送：
+每个目标的构建指纹包含该目标的 JSON 配置、[PKGBUILD](PKGBUILD)、[构建脚本](scripts/build-truenas-ko.sh)、[产物复用工具](scripts/truenas_artifacts.py) 和工作流内容，不包含整个目标清单或当前 Git 提交。因此只添加新版本不会使旧版本的指纹失效；修改驱动、共享构建逻辑或工作流会触发重新编译。
 
-```shell
-git tag TS-25.04.2
-git push origin TS-25.04.2
-```
+工作流查询已发布的 Release，查找相同指纹的 `.build.json` 记录，下载并校验完整产物后跳过该目标的下载和编译。没有记录、产物缺失或校验失败时重新编译；草稿 Release 不会被复用。旧 Release 没有指纹记录，需要首次重新编译。手动运行勾选 `force_rebuild` 可强制重编译所选目标，但仍可使用 update 下载缓存。
 
-标签构建发布到同名 Release。无标签构建发布到独立的预发布 Release，名称为 `ci-TS-25.04.1-<commit>-<run-id>-<attempt>`，不会创建或移动 `TS-25.04.1` 标签。重复运行标签构建会更新同名 Release 的附件。
-
-构建使用 Debian Trixie 容器和 GCC 14，合并对应内核源码中的 `debian_amd64.config`、`truenas.config` 和 `tn-production.config`，保留生产内核配置和版本后缀。由于 TrueNAS 启用 `CONFIG_MODVERSIONS`，工作流会构建内核及内置模块以生成完整的 `Module.symvers`，而不是仅执行 `modules_prepare`。因此构建时间和磁盘消耗较大。
+每次 Release 都包含所选目标的完整产物集合，包括本次编译和复用的产物。复用产物的构建信息保留原始编译提交。标签推送发布到同名 Release；分支和手动运行发布到独立预发布 Release，名称为 `ci-<commit>-<run-id>-<attempt>`。工作流先创建草稿并上传全部附件，再公开发布；不会覆盖已存在的同名 Release。上传或发布失败可能留下草稿，重跑同一标签前需清理该草稿。
 
 驱动版本、下载地址和 SHA256 从本仓库的 [PKGBUILD](PKGBUILD) 读取；编译选项与 [dkms.conf](dkms.conf) 一致：禁用 ASPM，启用 TX 多队列、PTP 和 RSS。
 
-Release 附件包含 `.ko`、`kernel.config`、`build-info.txt` 和 `SHA256SUMS`。`build-info.txt` 记录实际内核版本、源码提交、编译器和模块 `vermagic`。工作流会检查模块的 x86_64 架构和 `vermagic` 内核版本。
+每个目标的 Release 附件包含 `.ko`、`.config`、`.txt`、`.SHA256SUMS` 和 `.build.json`。`.txt` 记录实际内核版本、原始构建提交、编译器、update 和 `Module.symvers` 校验和及模块 `vermagic`；`.build.json` 记录构建指纹和完整产物的 SHA256。工作流检查模块的 x86_64 架构、`vermagic` 内核版本和导入符号 CRC。
 
 仓库需要启用 GitHub Actions，且仓库或组织策略允许工作流使用 `contents: write` 发布 Release；无需额外配置个人访问令牌。
 
 ### 加载前检查
 
-在 TrueNAS 上执行 `uname -r`，确认与 Release 的 `build-info.txt` 中 `Kernel release` 完全一致。版本标签相同或 `vermagic` 相同并不单独保证 ABI 兼容，仍需在目标 TrueNAS 系统验证实际加载和网卡工作情况。
+在 TrueNAS 上执行 `uname -r`，确认与 Release 的 `.txt` 构建信息中 `Kernel release` 完全一致。版本标签相同或 `vermagic` 相同并不单独保证 ABI 兼容，仍需在目标 TrueNAS 系统验证实际加载和网卡工作情况。
 
 产物没有签名；启用强制模块签名或 Secure Boot 策略的系统可能拒绝加载，需要使用系统信任的签名密钥处理。不要通过强制加载绕过版本或符号校验。替换当前正在使用的网卡驱动可能断开网络，请先准备本地控制台或带外管理。TrueNAS 升级可能更换内核或清理手动安装的模块，升级后需要重新匹配构建。

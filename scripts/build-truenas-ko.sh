@@ -120,3 +120,6 @@ install -m 0644 "$kernel_config" "$dist_dir/$artifact.config"
 } > "$dist_dir/$artifact.txt"
 cd "$dist_dir"
 sha256sum "$artifact.ko" "$artifact.config" "$artifact.txt" > "$artifact.SHA256SUMS"
+if [[ -n "${BUILD_FINGERPRINT:-}" ]]; then
+  python3 "$workspace/scripts/truenas_artifacts.py" record
+fi
