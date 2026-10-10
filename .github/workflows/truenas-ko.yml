@@ -44,7 +44,11 @@ jobs:
               if not re.fullmatch(r'[0-9][A-Za-z0-9._-]*', version):
                   raise SystemExit(f'Invalid version: {version}')
               if selected == 'all' or selected == version:
-                  entries.append({'version': version, 'container': target['container']})
+                  checksum = target['update_sha256']
+                  if not re.fullmatch(r'[0-9a-f]{64}', checksum):
+                    raise SystemExit(f'Invalid update SHA256: {version}')
+                  entries.append({'version': version, 'container': target['container'],
+                          'update_sha256': checksum})
           if not entries:
               raise SystemExit('No build targets selected')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
@@ -67,6 +71,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Cache official TrueNAS update
+        uses: actions/cache@v4
+        with:
+          path: .build/truenas-${{ matrix.version }}/update.squashfs
+          key: truenas-update-${{ runner.os }}-${{ matrix.version }}-${{ matrix.update_sha256 }}
 
       - name: Build against official update headers
         env:

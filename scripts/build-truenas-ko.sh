@@ -17,16 +17,15 @@ import sys
 
 with open(sys.argv[1]) as manifest:
     target = json.load(manifest)[sys.argv[2]]
-for field in ("update_url", "checksum_url", "update_sha256", "kernel_release", "compiler"):
+for field in ("update_url", "update_sha256", "kernel_release", "compiler"):
     print(target[field])
 PY
 )
-[[ ${#target[@]} == 5 ]]
+[[ ${#target[@]} == 4 ]]
 update_url=${target[0]}
-checksum_url=${target[1]}
-update_sha256=${target[2]}
-expected_release=${target[3]}
-compiler=${target[4]}
+update_sha256=${target[1]}
+expected_release=${target[2]}
+compiler=${target[3]}
 [[ "$update_sha256" =~ ^[0-9a-f]{64}$ ]]
 [[ "$compiler" =~ ^gcc-[0-9]+$ ]]
 
@@ -39,9 +38,6 @@ fi
 build_dir="$workspace/.build/truenas-$TRUENAS_VERSION"
 mkdir -p "$build_dir"
 cd "$build_dir"
-curl --fail --location --retry 3 "$checksum_url" -o update.sha256
-published_sha256=$(awk 'NR == 1 {print $1}' update.sha256)
-[[ "$published_sha256" == "$update_sha256" ]]
 if ! printf '%s  update.squashfs\n' "$update_sha256" | sha256sum --check --status; then
   curl --fail --location --retry 3 "$update_url" -o update.squashfs
 fi
