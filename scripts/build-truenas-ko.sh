@@ -1,27 +1,73 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${KERNEL_TAG:?KERNEL_TAG must be set}"
+: "${TRUENAS_VERSION:?TRUENAS_VERSION must be set}"
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends \
-  bc binutils bison build-essential ca-certificates curl dwarves flex gcc-14 \
-  git kmod libelf-dev libssl-dev python3 rsync xz-utils zstd bzip2
+workspace="$PWD"
+if [[ "${INSTALL_BUILD_DEPS:-true}" == true ]]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends python3
+fi
+mapfile -t target < <(python3 - "$workspace/scripts/truenas-targets.json" "$TRUENAS_VERSION" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as manifest:
+    target = json.load(manifest)[sys.argv[2]]
+for field in ("update_url", "checksum_url", "update_sha256", "kernel_release", "compiler"):
+    print(target[field])
+PY
+)
+[[ ${#target[@]} == 5 ]]
+update_url=${target[0]}
+checksum_url=${target[1]}
+update_sha256=${target[2]}
+expected_release=${target[3]}
+compiler=${target[4]}
+[[ "$update_sha256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$compiler" =~ ^gcc-[0-9]+$ ]]
+
+if [[ "${INSTALL_BUILD_DEPS:-true}" == true ]]; then
+  apt-get install -y --no-install-recommends \
+    binutils build-essential ca-certificates curl "$compiler" kmod libelf-dev \
+    python3 squashfs-tools xz-utils bzip2
+fi
+
+build_dir="$workspace/.build/truenas-$TRUENAS_VERSION"
+mkdir -p "$build_dir"
+cd "$build_dir"
+curl --fail --location --retry 3 "$checksum_url" -o update.sha256
+published_sha256=$(awk 'NR == 1 {print $1}' update.sha256)
+[[ "$published_sha256" == "$update_sha256" ]]
+if ! printf '%s  update.squashfs\n' "$update_sha256" | sha256sum --check --status; then
+  curl --fail --location --retry 3 "$update_url" -o update.squashfs
+fi
+printf '%s  update.squashfs\n' "$update_sha256" | sha256sum --check -
+unsquashfs -no-progress -processors 2 -d outer -f update.squashfs rootfs.squashfs
+unsquashfs -no-progress -processors 2 -d rootfs -f outer/rootfs.squashfs \
+  usr/src/linux-headers-truenas-production-amd64 "boot/config-$expected_release"
+headers_dir="$build_dir/rootfs/usr/src/linux-headers-truenas-production-amd64"
+kernel_config="$build_dir/rootfs/boot/config-$expected_release"
+kernel_release=$(cat "$headers_dir/include/config/kernel.release")
+[[ "$kernel_release" == "$expected_release" ]]
+test -s "$headers_dir/Module.symvers"
+test -s "$headers_dir/include/generated/autoconf.h"
+test -x "$headers_dir/scripts/mod/modpost"
+grep -qx 'CONFIG_PCI=y' "$kernel_config"
+grep -qx 'CONFIG_MODULES=y' "$kernel_config"
+grep -qx 'CONFIG_MODVERSIONS=y' "$kernel_config"
+grep -Eq "^CONFIG_GCC_VERSION=${compiler#gcc-}[0-9]{4}$" "$kernel_config"
+compiler_version=$("$compiler" -dumpversion)
+[[ "${compiler_version%%.*}" == "${compiler#gcc-}" ]]
+symvers_sha256=$(sha256sum "$headers_dir/Module.symvers" | awk '{print $1}')
 
 export ARCH=x86_64
-export CC=gcc-14
-export HOSTCC=gcc-14
-export LOCALVERSION=
-export KBUILD_BUILD_USER=truenas-ci
-export KBUILD_BUILD_HOST=github-actions
-
-workspace="$PWD"
-kernel_dir="$workspace/kernel"
-git config --global --add safe.directory "$kernel_dir"
-kernel_commit=$(git -C "$kernel_dir" rev-parse HEAD)
+export CC="$compiler"
+export HOSTCC="$compiler"
+unset LOCALVERSION KBUILD_OUTPUT KBUILD_EXTMOD
 
 # shellcheck source=PKGBUILD
 source "$workspace/PKGBUILD"
@@ -30,57 +76,51 @@ driver_url="${source[0]#*::}"
 curl --fail --location --retry 3 "$driver_url" -o "$driver_archive"
 printf '%s  %s\n' "${sha256sums[0]}" "$driver_archive" | sha256sum --check -
 tar -xjf "$driver_archive"
-driver_dir="$workspace/${_pkgname}-${pkgver}/src"
+driver_dir="$build_dir/${_pkgname}-${pkgver}/src"
 test -f "$driver_dir/Makefile"
-
-cd "$kernel_dir"
-config_dir=scripts/package/truenas
-for fragment in debian_amd64.config truenas.config tn-production.config; do
-  test -s "$config_dir/$fragment"
-done
-make defconfig
-bash scripts/kconfig/merge_config.sh -m .config \
-  "$config_dir/debian_amd64.config" \
-  "$config_dir/truenas.config" \
-  "$config_dir/tn-production.config"
-make olddefconfig
-grep -qx 'CONFIG_PCI=y' .config
-grep -qx 'CONFIG_MODULES=y' .config
-make archprepare
-mkdir -p debian/certs
-cp "$config_dir/debian-uefi-certs.pem" debian/certs/
-
-kernel_release=$(make -s kernelrelease)
-make -j"$(nproc)" vmlinux modules
-test -s Module.symvers
-make -j"$(nproc)" M="$driver_dir" \
+make -C "$headers_dir" -j"$(nproc)" M="$driver_dir" \
   CONFIG_ASPM=n ENABLE_MULTIPLE_TX_QUEUE=y ENABLE_PTP_SUPPORT=y \
   ENABLE_RSS_SUPPORT=y modules
 
 module="$driver_dir/r8125.ko"
 test -s "$module"
 vermagic=$(modinfo -F vermagic "$module")
-if [[ "${vermagic%% *}" != "$kernel_release" ]]; then
-  printf 'Kernel release mismatch: %s != %s\n' "$vermagic" "$kernel_release" >&2
-  exit 1
-fi
-readelf -h "$module" | grep -q 'Machine:.*Advanced Micro Devices X86-64'
+[[ "${vermagic%% *}" == "$kernel_release" ]]
+readelf -h "$module" | grep 'Machine:.*Advanced Micro Devices X86-64'
+modprobe --show-modversions "$module" > module-versions.txt
+test -s module-versions.txt
+awk '
+  NR == FNR { crc[$2] = tolower($1); next }
+  {
+    count++
+    if (!($2 in crc) || tolower($1) != crc[$2]) {
+      print "Symbol CRC mismatch:", $2, $1, crc[$2] > "/dev/stderr"
+      failed = 1
+    }
+  }
+  END { if (!count || failed) exit 1; print "Verified symbol CRCs:", count }
+' "$headers_dir/Module.symvers" module-versions.txt
+[[ "$(sha256sum "$headers_dir/Module.symvers" | awk '{print $1}')" == "$symvers_sha256" ]]
 
-mkdir -p "$workspace/dist"
-artifact="r8125-${pkgver}-${KERNEL_TAG}-${kernel_release}-x86_64.ko"
-install -m 0644 "$module" "$workspace/dist/$artifact"
-cp .config "$workspace/dist/kernel.config"
+dist_dir="$workspace/dist/$TRUENAS_VERSION"
+mkdir -p "$dist_dir"
+artifact="r8125-${pkgver}-TrueNAS-${TRUENAS_VERSION}-${kernel_release}-x86_64"
+install -m 0644 "$module" "$dist_dir/$artifact.ko"
+install -m 0644 "$kernel_config" "$dist_dir/$artifact.config"
 {
   printf 'Driver: r8125 %s\n' "$pkgver"
   printf 'Packaging: https://github.com/%s/commit/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA"
-  printf 'Kernel tag: %s\nKernel release: %s\n' "$KERNEL_TAG" "$kernel_release"
-  printf 'Kernel commit: https://github.com/truenas/linux/commit/%s\n' "$kernel_commit"
-  printf 'Compiler: %s\n' "$(gcc-14 --version | head -n 1)"
+  printf 'TrueNAS: %s\nKernel release: %s\n' "$TRUENAS_VERSION" "$kernel_release"
+  printf 'Update: %s\nUpdate SHA256: %s\n' "$update_url" "$update_sha256"
+  printf 'Module.symvers SHA256: %s\n' "$symvers_sha256"
+  printf 'Compiler: %s\n' "$("$compiler" --version | head -n 1)"
+  cat "$headers_dir/include/generated/compile.h"
+  printf 'Options: CONFIG_ASPM=n ENABLE_MULTIPLE_TX_QUEUE=y ENABLE_PTP_SUPPORT=y ENABLE_RSS_SUPPORT=y\n'
   printf 'Vermagic: %s\n' "$vermagic"
   printf '\nUnsigned module. The target uname -r must match the kernel release above.\n'
   printf 'Matching vermagic alone does not prove runtime ABI compatibility.\n'
   printf '\n'
   modinfo "$module"
-} > "$workspace/dist/build-info.txt"
-cd "$workspace/dist"
-sha256sum "$artifact" kernel.config build-info.txt > SHA256SUMS
+} > "$dist_dir/$artifact.txt"
+cd "$dist_dir"
+sha256sum "$artifact.ko" "$artifact.config" "$artifact.txt" > "$artifact.SHA256SUMS"

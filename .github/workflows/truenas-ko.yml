@@ -1,20 +1,63 @@
-name: Build TrueNAS r8125 module
+name: Build TrueNAS r8125 modules
 
 on:
   push:
     branches: ['**']
     tags: ['**']
   workflow_dispatch:
+    inputs:
+      version:
+        description: TrueNAS version from the manifest, or all
+        default: all
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  targets:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    permissions:
-      contents: write
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select build targets
+        id: select
+        env:
+          SELECTED_VERSION: ${{ inputs.version || 'all' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          with open('scripts/truenas-targets.json') as manifest:
+              targets = json.load(manifest)
+          selected = os.environ['SELECTED_VERSION']
+          if selected != 'all' and selected not in targets:
+              raise SystemExit(f'Unknown TrueNAS version: {selected}')
+          entries = []
+          for version, target in targets.items():
+              if not re.fullmatch(r'[0-9][A-Za-z0-9._-]*', version):
+                  raise SystemExit(f'Invalid version: {version}')
+              if selected == 'all' or selected == version:
+                  entries.append({'version': version, 'container': target['container']})
+          if not entries:
+              raise SystemExit('No build targets selected')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps({'include': entries}) + '\n')
+          PY
+
+  build:
+    needs: targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     defaults:
       run:
         shell: bash
@@ -25,86 +68,65 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Select kernel and release tags
-        id: target
+      - name: Build against official update headers
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          kernel_tag=TS-25.04.1
-          tagged=false
-          if [[ "$REF_TYPE" == tag ]]; then
-            kernel_tag="$REF_NAME"
-            tagged=true
-          else
-            mapfile -t tags < <(git tag --points-at HEAD --list 'TS-*' | sort)
-            if (( ${#tags[@]} > 1 )); then
-              echo '::error::Multiple TS tags point at this commit; run the workflow on a specific tag.'
-              exit 1
-            elif (( ${#tags[@]} == 1 )); then
-              kernel_tag="${tags[0]}"
-              tagged=true
-            fi
-          fi
-          if [[ ! "$kernel_tag" =~ ^TS-[0-9][A-Za-z0-9._-]*$ ]]; then
-            echo '::error::The pushed tag must be a TrueNAS kernel tag such as TS-25.04.2.'
-            exit 1
-          fi
-          release_tag="$kernel_tag"
-          if [[ "$tagged" == false ]]; then
-            release_tag="ci-${kernel_tag}-${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          fi
-          printf 'kernel_tag=%s\nrelease_tag=%s\ntagged=%s\n' \
-            "$kernel_tag" "$release_tag" "$tagged" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout matching TrueNAS kernel tag
-        uses: actions/checkout@v4
-        with:
-          repository: truenas/linux
-          ref: refs/tags/${{ steps.target.outputs.kernel_tag }}
-          path: kernel
-          persist-credentials: false
-
-      - name: Free runner disk for kernel build
-        run: |
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
-          df -h "$GITHUB_WORKSPACE"
-
-      - name: Build in Debian with GCC 14
-        env:
-          KERNEL_TAG: ${{ steps.target.outputs.kernel_tag }}
+          TRUENAS_VERSION: ${{ matrix.version }}
+          BUILD_CONTAINER: ${{ matrix.container }}
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
-            -e KERNEL_TAG -e GITHUB_SHA -e GITHUB_REPOSITORY \
-            debian:trixie bash scripts/build-truenas-ko.sh
+            -e TRUENAS_VERSION -e GITHUB_SHA -e GITHUB_REPOSITORY \
+            "$BUILD_CONTAINER" bash scripts/build-truenas-ko.sh
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: r8125-${{ steps.target.outputs.kernel_tag }}-${{ github.run_id }}
-          path: dist/*
+          name: r8125-TrueNAS-${{ matrix.version }}
+          path: dist/${{ matrix.version }}/*
           if-no-files-found: error
 
-      - name: Publish GitHub Release
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: r8125-TrueNAS-*
+          path: dist
+          merge-multiple: true
+      - name: Publish complete GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
-          KERNEL_TAG: ${{ steps.target.outputs.kernel_tag }}
-          TAGGED: ${{ steps.target.outputs.tagged }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            options=(--prerelease --latest=false)
-            if [[ "$TAGGED" == true ]]; then
-              options=(--verify-tag --latest=false)
-            fi
-            gh release create "$RELEASE_TAG" \
-              --target "$GITHUB_SHA" \
-              --title "r8125 for TrueNAS ${KERNEL_TAG}" \
-              --notes-file dist/build-info.txt "${options[@]}"
+          release_tag="ci-${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          options=(--prerelease --latest=false)
+          if [[ "$REF_TYPE" == tag ]]; then
+            release_tag="$REF_NAME"
+            options=(--verify-tag --latest=false)
           fi
-          gh release upload "$RELEASE_TAG" dist/* --clobber
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            echo '::error::Release already exists; refusing to mix old and new artifacts.'
+            exit 1
+          fi
+          for checksums in dist/*.SHA256SUMS; do
+            (cd dist && sha256sum --check "${checksums#dist/}")
+          done
+          printf 'r8125 modules built against official TrueNAS update headers.\n\n' > release-notes.txt
+          for info in dist/*.txt; do
+            sed '/^alias:/d' "$info" >> release-notes.txt
+            printf '\n' >> release-notes.txt
+          done
+          gh release create "$release_tag" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "r8125 TrueNAS modules: $release_tag" \
+            --notes-file release-notes.txt "${options[@]}"
