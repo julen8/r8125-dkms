@@ -64,11 +64,37 @@ Actions 页面仍会为每个所选版本显示 `build` 矩阵任务，因为复
 
 仓库需要启用 GitHub Actions，且仓库或组织策略允许工作流使用 `contents: write` 发布 Release；无需额外配置个人访问令牌。
 
-### 加载前检查
+### 如何在truenas上使用
 
-在 TrueNAS 上执行 `uname -r`，确认与 Release 的 `.txt` 构建信息中 `Kernel release` 完全一致。版本标签相同或 `vermagic` 相同并不单独保证 ABI 兼容，仍需在目标 TrueNAS 系统验证实际加载和网卡工作情况。
+0. 在 TrueNAS 上执行 `uname -r`，确认与 Release 的 `.txt` 构建信息中 `Kernel release` 完全一致。版本标签相同或 `vermagic` 相同并不单独保证 ABI 兼容，仍需在目标 TrueNAS 系统验证实际加载和网卡工作情况。
 
-产物没有签名；启用强制模块签名或 Secure Boot 策略的系统可能拒绝加载，需要使用系统信任的签名密钥处理。不要通过强制加载绕过版本或符号校验。替换当前正在使用的网卡驱动可能断开网络，请先准备本地控制台或带外管理。TrueNAS 升级可能更换内核或清理手动安装的模块，升级后需要重新匹配构建。
+
+1. 先设置阻止r8169驱动加载
+
+```bash
+# 主要是 module_blacklist=r8169， i915.enable_gvt=1 i915.enable_guc=0 这两个是为了使用GVT-G虚拟显卡功能
+midclt call system.advanced.update \
+  '{"kernel_extra_options":"i915.enable_gvt=1 i915.enable_guc=0 module_blacklist=r8169"}'
+
+#查看是否设置成功
+midclt call system.advanced.conigf | jq -r .kernel_extra_options
+```
+
+2. 在web界面的 系统->高级设置->开机/关机脚本设置一个 Pre Init 开机启动脚本
+脚本内容：
+```bash
+#!/usr/bin/env bash
+
+run() {
+    # 改成实际ko的路径
+    insmod /mnt/app/network/r8125-9.018.00-TrueNAS-25.10.7-6.12.105-production+truenas-x86_64.ko
+    sleep 1
+    # 会重新同步数据库中的网络配置到系统，即使没有待提交变更也会执行
+    midclt call interface.commit '{"rollback":false,"checkin_timeout":0}'
+}
+
+run &
+```
 
 ### 查看驱动debug信息
 
