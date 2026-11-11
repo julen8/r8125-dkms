@@ -19,5 +19,12 @@
     "kernel_release": "6.12.105-production+truenas",
     "container": "debian:bookworm",
     "compiler": "gcc-12"
+  },
+  "25.10.8": {
+    "update_url": "https://download.truenas.com/TrueNAS-SCALE-Goldeye/25.10.8/TrueNAS-SCALE-25.10.8.update",
+    "update_sha256": "c518e5407759686d1ba46512900b887ad4d8f5f7f80e40bc3317bf38b035190d",
+    "kernel_release": "6.12.113-production+truenas",
+    "container": "debian:bookworm",
+    "compiler": "gcc-12"
   }
 }
